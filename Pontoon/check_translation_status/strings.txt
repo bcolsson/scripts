@@ -1,0 +1,5 @@
+browser/browser/ipProtection.ftl/ipprotection-feature-introduction-link-text-privacy-1
+browser/browser/ipProtection.ftl/ipprotection-feature-introduction-link-text-captive-portal-1
+browser/browser/ipProtection.ftl/ipprotection-location-selection-callout-description-1
+browser/browser/ipProtection.ftl/unauthenticated-choose-location-message-1
+browser/browser/ipProtection.ftl/ip-protection-not-opted-in-4

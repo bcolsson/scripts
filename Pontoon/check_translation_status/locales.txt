@@ -1,0 +1,13 @@
+de
+es-ES
+es-MX
+fi
+fr
+it
+ja
+nl
+pl
+pt-PT
+sv-SE
+th
+da
