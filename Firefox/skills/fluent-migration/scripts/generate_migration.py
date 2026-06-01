@@ -739,9 +739,8 @@ def print_needs_attention(reports, legacy_pending):
     is an unchanged move to another file, which is auto-handled)."""
     warnings = [(r, e) for r in reports for e in r["same_id_changes"]]
     suggested = [(r, e) for r in reports for e in r["rename_suggested"]]
-    broken = [(r, m) for r in reports for m in r["broken"]]
     ambiguous = [(r, nid) for r in reports for nid in r["ambiguous"]]
-    if not (warnings or suggested or broken or ambiguous or legacy_pending):
+    if not (warnings or suggested or ambiguous or legacy_pending):
         return
 
     print("\n" + "-" * 72)
@@ -762,11 +761,6 @@ def print_needs_attention(reports, legacy_pending):
         for _r, e in suggested:
             refs = ", ".join(f"{(t['attr'] or 'value')} <- {t['source_ref']}" for t in e["targets"])
             print(f"   {e['id']} -> {e['suggested_id']} (suggested): {refs}")
-
-    if broken:
-        print("\nRENAMED/MOVED but text changed - not migratable; translate fresh:")
-        for _r, m in broken:
-            print(f"   {m['src_id']} -> {m['new_id']}")
 
     if ambiguous:
         print("\nAMBIGUOUS content match - same text on several strings; resolve by hand:")

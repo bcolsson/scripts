@@ -84,7 +84,6 @@ against the new English. The only exception is an *unchanged* cross-file move
 - **WARNING - rename** -> kept its id but only restructured (attributes
   dropped/added with reused text). Give it a new id and add it to the migration so
   the translations carry; the helper prints the suggested id + `COPY_PATTERN` refs.
-- **RENAMED/MOVED but text changed** -> not migratable; translate fresh.
 - **AMBIGUOUS** -> text matches several strings; pick the source by hand.
 - **LEGACY .properties** -> hand-write `COPY`/`REPLACE`/`PLURALS`/`CONCAT` (see
   below), or scaffold with `properties-to-ftl`
