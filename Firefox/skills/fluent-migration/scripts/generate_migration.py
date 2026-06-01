@@ -586,9 +586,42 @@ def collect_files(rev):
     return files
 
 
+def migration_notes(migration):
+    """Per-migration things the user should verify, with the specifics (source id,
+    file, and the before/after text) needed to judge them. Returns a list of
+    strings; empty for a plain same-file rename that needs no review."""
+    notes = []
+    if migration.get("multi_source"):
+        notes.append(
+            f"assembled from {len(migration['multi_source'])} strings "
+            f"({', '.join(migration['multi_source'])}); confirm each pattern's source"
+        )
+    if migration["match_by"] == "content" and not migration.get("multi_source"):
+        notes.append(
+            f'matched to "{migration["src_id"]}" by identical text only (the ids differ); '
+            "confirm they are the same string"
+        )
+    if migration["match_by"] == "legacy":
+        notes.append(
+            f'copied from legacy .properties key "{migration["src_id"]}" in '
+            f"{migration['src_path']}; confirm no %S/#1/brand handling is needed"
+        )
+    if migration["moved"] and migration["match_by"] == "name":
+        notes.append(f"moved from another file ({migration['src_path']})")
+    for target in migration["targets"]:
+        if target.get("match") == "caps":
+            slot = target["attr"] or "value"
+            notes.append(
+                f'capitalization only on {slot}: "{target["text"]}" '
+                f'(was "{target["source_text"]}"); confirm only the casing changed'
+            )
+    return notes
+
+
 def emit_recipe_body(file_reports, bug=None, description=None):
     """Build the recipe source for clean migrations, one add_transforms block per
-    (target file, source file) pair."""
+    (target file, source file) pair. Verification notes are reported separately
+    (see migration_notes / the skill output), not written into the recipe."""
     blocks = []
     for report in file_reports:
         tpath = report["recipe_path"]
@@ -596,33 +629,8 @@ def emit_recipe_body(file_reports, bug=None, description=None):
         for migration in report["migrations"]:
             groups.setdefault(migration["src_path"], []).append(migration)
         for from_path, migrations in groups.items():
-            lines, notes = [], []
+            lines = []
             for migration in migrations:
-                if migration.get("multi_source"):
-                    notes.append(
-                        f"    # {migration['new_id']} assembled from "
-                        f"{', '.join(migration['multi_source'])} - verify each source."
-                    )
-                if migration["match_by"] == "content":
-                    notes.append(
-                        f"    # Matched by content (identifiers differ): verify "
-                        f"{migration['new_id']} replaces {migration['src_id']}."
-                    )
-                if migration["match_by"] == "legacy":
-                    notes.append(
-                        f"    # Migrated from legacy .properties ({from_path}); "
-                        f"verify {migration['new_id']} matches {migration['src_id']}."
-                    )
-                if migration["moved"] and migration["match_by"] == "name":
-                    notes.append(f"    # {migration['new_id']} moved from {from_path}.")
-                if migration["caps_only"]:
-                    changed = [
-                        (t["attr"] or "value") for t in migration["targets"] if t.get("match") == "caps"
-                    ]
-                    notes.append(
-                        f"    # Capitalization-only change on {migration['new_id']} "
-                        f"({', '.join(changed)}); translations kept - verify this is intended."
-                    )
                 copy = "COPY" if migration["source_kind"] == "properties" else "COPY_PATTERN"
                 targets = migration["targets"]
                 if len(targets) == 1 and targets[0]["attr"] is None:
@@ -632,13 +640,12 @@ def emit_recipe_body(file_reports, bug=None, description=None):
                     for target in targets:
                         lines.append(f'    .{target["attr"]} = {{{copy}(from_path, "{target["source_ref"]}")}}')
             body = "\n".join(lines)
-            note_block = ("\n".join(notes) + "\n") if notes else ""
             if from_path == tpath:
                 paths = f'    source = "{from_path}"\n    target = source'
             else:
                 paths = f'    source = "{from_path}"\n    target = "{tpath}"'
             blocks.append(
-                f'''{note_block}{paths}
+                f'''{paths}
     ctx.add_transforms(
         target,
         target,
@@ -749,8 +756,9 @@ def print_needs_attention(reports, legacy_pending):
             print(f"   {e['id']}  ({r['recipe_path']}) - {kinds}")
 
     if suggested:
-        print("\nSUGGESTED rename - only attributes dropped/added with reused text;")
-        print("rename it (the translations can then be carried) and add the COPY_PATTERN:")
+        print("\n!! WARNING - rename: kept its id but only restructured (attributes")
+        print("dropped/added with reused text). Give it a NEW id and add it to the")
+        print("migration so the translations carry:")
         for _r, e in suggested:
             refs = ", ".join(f"{(t['attr'] or 'value')} <- {t['source_ref']}" for t in e["targets"])
             print(f"   {e['id']} -> {e['suggested_id']} (suggested): {refs}")
@@ -808,9 +816,18 @@ def main():
         print(f"  [{'OK  ' if ok else 'FAIL'}] {migration['new_id']:<40} {kind:<12} <- {src}")
         if not ok:
             print(f"         {detail}")
-    if any(m.get("multi_source") for m in migrations):
-        print("\n  Note: messages marked '<- a, b' are assembled from multiple source")
-        print("  strings - confirm each pattern is sourced from the intended string.")
+
+    # Things to verify, shown here as a table rather than as comments in the recipe.
+    noted = [(m["new_id"], migration_notes(m)) for m in migrations]
+    noted = [(nid, ns) for nid, ns in noted if ns]
+    if noted:
+        width = max(len(nid) for nid, _ in noted)
+        print("\n" + "-" * 72)
+        print("Review before landing:")
+        for nid, ns in noted:
+            print(f"  {nid:<{width}}  {ns[0]}")
+            for extra in ns[1:]:
+                print(f"  {'':<{width}}  {extra}")
 
     recipe = emit_recipe_body(reports, bug=args.bug, description=args.description)
 

@@ -49,19 +49,28 @@ uncommitted changes); use the bug you're working on. Omitting it leaves a
 under `python/l10n/fluent_migrations/` named `bug_<number>_<slug>.py`.
 
 **3. Read the output**
-- *Verifying transforms* - `OK`/`FAIL` per message; `FAIL` = a reference didn't
-  resolve (wrong key/`from_path`).
-- *Validating recipe* - the library's static check.
-- *NEEDS ATTENTION* - everything not auto-generated; relay it (see below).
-- The file is written only if all checks pass.
+- *Verifying transforms* / *Validating recipe* - offline pre-screens; the file is
+  written only if both pass (step 4's test re-checks them authoritatively).
+- *Review before landing* - a table of per-migration items to confirm
+  (capitalization-only changes with their before/after text, content/legacy
+  matches, cross-file moves, multi-source assembly). Relay these to the user.
+- *NEEDS ATTENTION* - changes it could not auto-generate. The test reports these
+  only as ignorable INFO, so acting on them (see below) is your call, not the
+  test's.
 
-**4. Test** before submitting (this exercises real locales):
+**4. Test** - the authoritative check (runs the recipe against real l10n; exits
+non-zero on any error):
 ```bash
 ./mach fluent-migration-test python/l10n/fluent_migrations/bug_<NUMBER>_<desc>.py
 ```
-Expected diffs: non-migrated new strings show as removals; a capitalization-only
-migration shows an en-US-only diff (the test migrates en-US onto itself) - benign,
-other locales keep their translation. Any other diff means wrong references.
+Read its **"Fluent migration test summary"**, which classifies every finding (the
+diff above it is just a visual aid):
+- **ERROR** (must fix): a recipe string that wasn't migrated, a migrated value
+  differing beyond capitalization, a same-id/same-file migration, or a bad bug
+  number / missing `part {index}`.
+- **WARNING**: a migrated message differing only in capitalization - review it.
+- **INFO**: strings that differ but aren't in the recipe (new strings in the
+  patch, or quarantined strings) - safe to ignore.
 
 ## NEEDS ATTENTION (what to relay)
 
@@ -72,14 +81,14 @@ against the new English. The only exception is an *unchanged* cross-file move
 
 - **WARNING - changed but kept its id** -> needs a new id, translated fresh (no
   `.style`/"cosmetic" exception).
-- **SUGGESTED rename** -> only attributes dropped/added with reused text; rename
-  it and the translations carry (the helper prints the id + `COPY_PATTERN` refs).
+- **WARNING - rename** -> kept its id but only restructured (attributes
+  dropped/added with reused text). Give it a new id and add it to the migration so
+  the translations carry; the helper prints the suggested id + `COPY_PATTERN` refs.
 - **RENAMED/MOVED but text changed** -> not migratable; translate fresh.
 - **AMBIGUOUS** -> text matches several strings; pick the source by hand.
 - **LEGACY .properties** -> hand-write `COPY`/`REPLACE`/`PLURALS`/`CONCAT` (see
   below), or scaffold with `properties-to-ftl`
   (https://github.com/mozilla/properties-to-ftl).
-- Confirm any `[capitalization changed - verify]` / `[matched by content]` items.
 
 ## Recipe shape & hand-writing
 
@@ -107,18 +116,3 @@ keys. When editing the output or hand-writing the rest:
 
 Authoritative docs: `intl/l10n/docs/migrations/{overview,fluent,legacy,testing}.rst`.
 For recent examples grep `python/l10n/fluent_migrations/` (pruned each cycle).
-
-## Quick reference
-
-| Change | Migratable? | How |
-| --- | --- | --- |
-| Rename / restructure, same text (`foo`->`foo2`, `.label`->`.title`, ...) | Yes | `COPY_PATTERN(from_path, "old[.attr]")` |
-| Only capitalization differs | Yes (flag) | migrate; locales keep their own caps |
-| Same id moved to another file | Yes | `add_transforms(newFile, newFile, …, from_path=oldFile)` |
-| Seed: new id reuses a still-present string | Yes | `COPY_PATTERN(from_path, "kept-id")` |
-| Wholly different id, same text | Yes (verify) | paired by coverage |
-| Assembled from several same-file strings | Yes (verify) | per-pattern `COPY_PATTERN` |
-| Same id but text changed, or any reword | No | new id; translate fresh |
-| `.properties` plain string | Yes | `COPY(from_path, "key")` |
-| `.properties` with `%S`/`#1`/brand/markup | Yes (raw AST) | `REPLACE` / `PLURALS` / `CONCAT` |
-| Across-file assembly, `CONCAT` into one pattern, rule-transform | By hand | write manually |
