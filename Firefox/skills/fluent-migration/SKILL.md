@@ -4,12 +4,12 @@ description: >
   Use this skill when a patch or local changes rename, restructure, move, or
   replace Fluent (.ftl) strings - or migrate legacy .properties strings to Fluent
   - and you need a migration recipe in python/l10n/fluent_migrations so existing
-  translations carry over. It finds the changes, then builds, checks, and
-  validates the recipe with the in-tree `fluent.migrate` library (offline) and
-  writes the file. Triggers: "write/generate a fluent migration", "migrate these
-  strings", renamed/bumped l10n IDs (foo -> foo2), moving a value to/from an
-  attribute, moving a string between files, .properties -> Fluent. Also reports
-  changes that can't be migrated.
+  translations carry over. You read the diff, classify each changed string, write
+  the recipe by hand, and validate it with the in-tree `./mach
+  fluent-migration-test`. Triggers: "write/generate a fluent migration", "migrate
+  these strings", renamed/bumped l10n IDs (foo -> foo2), moving a value to/from an
+  attribute, moving a string between files, .properties -> Fluent. Also covers
+  changes that must NOT be migrated.
 ---
 
 ## What this does
@@ -19,15 +19,26 @@ shipped in the same patch. It tells l10n tooling to copy existing translations
 over to a renamed, moved, or restructured string, so locales don't fall back to
 English. It only helps when the English text can be **reused** - identical, or
 differing only in capitalization. If the wording really changed, the string gets
-translated fresh instead.
+translated fresh instead (give it a new id and leave it out of the recipe).
 
-**Two hard rules - never break them when generating a migration file:**
+You build the recipe by hand: read the diff, decide per string whether it's
+migratable, write the `add_transforms` blocks, then let `./mach
+fluent-migration-test` check them authoritatively against real l10n. There is no
+generator - the test is the source of truth.
+
+**Two hard rules - never break them when writing a migration file:**
 - **No partial migrations.** Migration is all-or-nothing per message. Every
   translatable part of the target message (its value and *each* attribute) must
   be rebuildable from reused source content via `COPY`/`COPY_PATTERN`. If any part
   is new or changed - a new attribute like an added `.description`, a changed
   value, or an attribute with reworded text - you can't migrate just the reused
   parts. Leave the **whole message** out of the recipe and let it translate fresh.
+  Bumping the id does **not** rescue such a message: a message that changed one
+  attribute (say `.style = ...45em` -> `...32em`) still needs a new id *and* still
+  stays out of the recipe, because migrating its unchanged `.title` while the
+  `.style` changed is exactly a partial migration. Never suggest "give it a new id
+  and migrate the reused part" - the new id and migratability are separate
+  questions, and a message only becomes migratable when *every* part is reused.
 - **No hardcoded strings.** Never put a literal in the recipe to fill in content
   the migration can't produce from a source string (for example, copying `.title`
   via `COPY_PATTERN` while hardcoding a changed `.style = ...`). Mixing copied
@@ -35,87 +46,142 @@ translated fresh instead.
   (Some landed patches do this as a deliberate human exception - but it's an
   exception, never something this skill should produce or suggest.)
 
-The helper detects the changes on its own (renames/bumps, restructures,
-cross-file moves, seeds, wholly-different-id renames, multi-source assembly, and
-legacy `.properties` -> Fluent), builds the transforms with `fluent.migrate`,
-checks them offline against the pre-change strings, validates the recipe with the
-library's `Validator`, and writes the file - **only if every check passes**.
-Anything it can't generate cleanly is listed under NEEDS ATTENTION.
-
 ## Workflow
 
-**1. Bug number** - pass it via `--bug` (it's never read from git, so this works
-on uncommitted changes); use the bug you're working on. If you omit it, the file
-gets a `Bug <NUMBER>` placeholder to fill in.
+### 1. Get the diff of the string changes
 
-**2. Run it** through `./mach python`:
+The bug number comes from the work you're doing, not from git, so this works on
+uncommitted changes too. Look only at `.ftl` / `.properties` files:
 
 ```bash
-# committed change:
-./mach python .claude/skills/fluent-migration/scripts/generate_migration.py \
-    --rev HEAD --bug 2043735 --description "Update the containers panel"
-# local-only change (omit --rev) and write the file:
-./mach python .claude/skills/fluent-migration/scripts/generate_migration.py \
-    --bug 2043735 --description "Update the containers panel" \
-    --output python/l10n/fluent_migrations/bug_2043735_containers_panel.py
+# working tree (local-only change):
+git diff -- '*.ftl' '*.properties'
+# committed change (single commit):
+git diff 'HEAD^!' -- '*.ftl' '*.properties'
+# committed change spanning several commits <base>..<tip>:
+git diff <base>~1 <tip> -- '*.ftl' '*.properties'
 ```
-`--rev` only picks the diff (omit it for the working tree). `--output` must be
-under `python/l10n/fluent_migrations/` and named `bug_<number>_<slug>.py`.
 
-**3. Read the output**
-- *Verifying transforms* / *Validating recipe* - offline pre-checks; the file is
-  written only if both pass (step 4's test re-checks them for real).
-- *Review before landing* - a table of per-migration items to confirm
-  (capitalization-only changes with their before/after text, content/legacy
-  matches, cross-file moves, multi-source assembly). Relay these to the user.
-- *NEEDS ATTENTION* - changes it couldn't auto-generate. The test reports these
-  only as ignorable INFO, so acting on them (see below) is your call, not the
-  test's.
+To confirm a string's text is reused, read its *old* value from the pre-change
+file. `<rev>` is the commit *before* the change (e.g. `HEAD^`, or `<base>~1`):
 
-**4. Test** - the real check (runs the recipe against actual l10n; exits
-non-zero on any error):
 ```bash
-./mach fluent-migration-test python/l10n/fluent_migrations/bug_<NUMBER>_<desc>.py
+git show <rev>:browser/locales/en-US/browser/preferences/containers.ftl
 ```
-Read its **"Fluent migration test summary"**, which sorts every finding into
-three levels (the diff above it is just a visual aid):
-- **ERROR** (must fix): a recipe string that wasn't migrated, a migrated value
-  differing by more than capitalization, a same-id/same-file migration, or a bad
-  bug number / missing `part {index}`.
-- **WARNING**: a migrated message that differs only in capitalization - review it.
-- **INFO**: strings that differ but aren't in the recipe (new strings in the
-  patch, or quarantined strings) - safe to ignore.
 
-## NEEDS ATTENTION (what to relay)
+### 2. Classify each changed string
+
+Decide, per message, what the recipe should do. This table is the core of the
+job:
+
+| What changed | Migrate? | How |
+| --- | --- | --- |
+| id renamed/bumped, text identical (`foo` -> `foo2`) | Yes | `COPY_PATTERN(from_path, "foo")` for the value; `"foo.attr"` for each attribute |
+| capitalization-only difference | Yes (still reusable) | same as above; the test flags it `WARNING` - confirm only the casing changed |
+| wording genuinely changed | **No** | new id, translated fresh; leave out of the recipe entirely |
+| moved to another file, text unchanged | Yes | `target` = new file, `from_path` = old file; a pure move may even keep its id |
+| value <-> attribute restructure, **all** text reused | Yes | map every reused piece with `COPY_PATTERN` |
+| restructure that adds/changes any text (new `.description`, changed `.style`, ...) | **No** (no partial) | leave the whole message out |
+| legacy `.properties` key -> Fluent | Yes | `COPY` / `REPLACE` / `PLURALS` / `CONCAT` (see below) |
 
 Cardinal rule: **a changed string must get a new identifier** (unique, with a
 meaning that stays stable across files) - otherwise locales keep showing the old
-translation next to the new English. The only exception is an *unchanged*
-cross-file move (it keeps its id, and the helper handles it automatically).
+translation next to the new English. "Changed" means any non-capitalization change
+to the value *or to any attribute* - including non-prose attributes like `.style`,
+`.accesskey`, or `.key`. A message whose only edit is `.style = ...45em` ->
+`...32em` still needs a new id. The only exception is an *unchanged* cross-file
+move, which keeps its id. Brand-new strings (no predecessor) are never migrated -
+they're translated from scratch.
 
-- **WARNING - changed but kept its id** -> needs a new id, translated fresh (no
-  `.style`/"cosmetic" exception).
-- **WARNING - rename** -> kept its id but was only restructured. Give it a new id,
-  then add it to the migration **only if the whole message is still reusable** -
-  that is, its value and every attribute map 1:1 onto reused source content via
-  `COPY_PATTERN`. If the restructure added new text or changed any wording (a new
-  `.description`, a changed `.style`), the no-partial-migration rule applies:
-  leave the whole message out and let it translate fresh. The helper prints the
-  suggested id and `COPY_PATTERN` refs when the message is fully reusable.
-- **AMBIGUOUS** -> the text matches several strings; pick the source by hand.
-- **LEGACY .properties** -> hand-write `COPY`/`REPLACE`/`PLURALS`/`CONCAT` (see
-  below), or scaffold with `properties-to-ftl`
-  (https://github.com/mozilla/properties-to-ftl).
+If text matches several candidate source strings (AMBIGUOUS), pick the source by
+hand. For legacy `.properties`, you can also scaffold with `properties-to-ftl`
+(https://github.com/mozilla/properties-to-ftl).
+
+### 3. Write the recipe file
+
+Path: `python/l10n/fluent_migrations/bug_<number>_<slug>.py`. The docstring must
+contain the bug number and the literal `part {index}`. Use one `add_transforms`
+block per `(target, from_path)` pair. See "Recipe shape" below for the template.
+
+### 4. Validate with the in-tree test (authoritative)
+
+```bash
+./mach fluent-migration-test python/l10n/fluent_migrations/bug_<number>_<slug>.py
+```
+
+It checks out the pre-change strings, runs the recipe, and exits non-zero on any
+error. Read the **"Fluent migration test summary"** (the diff above it is just a
+visual aid), which sorts every finding into three levels:
+
+- **ERROR** (must fix; the test exits non-zero): a recipe string that wasn't
+  migrated, a migrated message differing from the reference by more than
+  capitalization, a same-id/same-file ("migrated from itself") migration, a
+  non-normalized reference path, a recipe that couldn't be inspected or loaded
+  ("Could not inspect declared targets"), or a bad bug number / a commit missing
+  `part {index}`.
+- **WARNING** (surface every one): a migrated message differing only in
+  capitalization (confirm only the casing changed - then it's fine); a migrated
+  message "not present in the reference" (the target id doesn't exist in the new
+  en-US, usually a wrong or mistyped target id - fix it); or "No migration applied"
+  (the recipe produced no changes at all - almost always a mistake - fix it).
+- **INFO**: strings that differ but aren't in the recipe. Surface these to the
+  user for review rather than silently ignoring them: any string with an added or
+  removed attribute, or any non-capitalization change to its value *or any
+  attribute*, needs a **new string id** (keeping the id leaves locales with the
+  stale translation). This counts **every** attribute, including ones that aren't
+  prose - `.style`, `.accesskey`, `.key`, `.aria-label`, etc. are all localizable,
+  so a changed `.style = min-width: 32em` or a changed `.accesskey` is a real
+  change that demands a new id. Never wave a diff through on the reasoning that an
+  attribute "isn't translatable text" - if it's in the `.ftl`, locales own it.
+  Flagging that a string "needs a new id" is **not** an invitation to then migrate
+  its unchanged parts: if any part changed, the whole message stays out (no
+  partial - see the hard rules). Genuinely new strings and quarantined strings are
+  fine to ignore.
+
+Relay **every** ERROR and WARNING line the summary prints to the user - never drop
+a finding just because it isn't described above. Use the summary to correct
+yourself too: an ERROR on a string you left out means it *was* fully reusable - add
+it; an ERROR on a string you included means the text wasn't reusable - remove it,
+and re-check against the two hard rules (you may be attempting a partial or
+hardcoded migration).
 
 ## Recipe shape & hand-writing
 
-The helper emits `COPY_PATTERN` for FTL sources and `COPY` for `.properties`
-keys. When editing the output or hand-writing the rest:
+Template - `COPY_PATTERN` for FTL sources, `COPY` for `.properties` keys:
+
+```python
+# Any copyright is dedicated to the Public Domain.
+# http://creativecommons.org/publicdomain/zero/1.0/
+
+from fluent.migrate.helpers import transforms_from
+
+
+def migrate(ctx):
+    """Bug <number> - <description>, part {index}."""
+
+    source = "browser/browser/preferences/containers.ftl"
+    target = "toolkit/toolkit/global/contextual-identity.ftl"
+    ctx.add_transforms(
+        target,
+        target,
+        transforms_from(
+            """
+user-context-color-blue =
+    .label = {COPY_PATTERN(from_path, "containers-color-blue.label")}
+""",
+            from_path=source,
+        ),
+    )
+```
+
 - Recipe paths drop `locales/en-US/` (`browser/locales/en-US/browser/foo.ftl` ->
   `browser/browser/foo.ftl`). `from_path` is the *old* file, `target` is the new
   file; use one `add_transforms` block per (target, `from_path`) pair.
-- `COPY_PATTERN`: `"id"` copies the value, `"id.attr"` copies an attribute (list
-  each one).
+- Inside the `transforms_from` string, always reference `from_path` (the keyword
+  passed to `transforms_from`), regardless of the local variable's name.
+- `COPY_PATTERN`: `"id"` copies the value, `"id.attr"` copies an attribute. List
+  every attribute you migrate - and per the no-partial rule, migrate all of a
+  message's translatable parts or none.
 - `.properties` -> Fluent uses **`COPY`** with the flat key. For placeholders,
   brand, plurals, or markup, drop down to the raw AST:
   ```python
@@ -130,7 +196,8 @@ keys. When editing the output or hand-writing the rest:
     lambda t: REPLACE_IN_TEXT(t, {"#1": VARIABLE_REFERENCE("count")}))`.
   - markup / joined strings -> `CONCAT(...)`; never add your own spaces/punctuation.
 - FTL->FTL transforms (strip `…`, remove a `<span>`, rename a `{ $var }`) need a
-  custom `TransformPattern` subclass. Never bake English literals into a template.
+  custom `TransformPattern` subclass. Never bake English literals into a template -
+  that is the no-hardcoding rule.
 
 Authoritative docs: `intl/l10n/docs/migrations/{overview,fluent,legacy,testing}.rst`.
 For recent examples grep `python/l10n/fluent_migrations/` (pruned each cycle).
