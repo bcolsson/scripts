@@ -80,26 +80,41 @@ job:
 | capitalization-only difference | Yes (still reusable) | same as above; the test flags it `WARNING` - confirm only the casing changed |
 | wording genuinely changed | **No** | new id, translated fresh; leave out of the recipe entirely |
 | moved to another file, text unchanged | Yes | `target` = new file, `from_path` = old file; a pure move may even keep its id |
-| value <-> attribute restructure, **all** text reused | Yes | map every reused piece with `COPY_PATTERN` |
+| value <-> attribute restructure, **all** text reused, **with a new id or new file** | Yes | `COPY_PATTERN` each reused piece from the *old* id |
+| value <-> attribute restructure keeping the **same id in the same file** | **No - flag it** | the message changed, so this is a cardinal-rule violation: the dev must bump the id first. A recipe entry here is a self-migration the test rejects (no-op) |
 | restructure that adds/changes any text (new `.description`, changed `.style`, ...) | **No** (no partial) | leave the whole message out |
+| brand-new id, but **every** part reuses an existing source string's text (cross-message reuse) | Yes | `COPY_PATTERN(from_path, "<other-source-id>")` (or `.attr`) for each part; confirm the source context matches - see cross-message note below |
 | legacy `.properties` key -> Fluent | Yes | `COPY` / `REPLACE` / `PLURALS` / `CONCAT` (see below) |
 
 Cardinal rule: **a changed string must get a new identifier** (unique, with a
 meaning that stays stable across files) - otherwise locales keep showing the old
 translation next to the new English. "Changed" means any non-capitalization change
 to the value *or to any attribute* - including non-prose attributes like `.style`,
-`.accesskey`, or `.key`. A message whose only edit is `.style = ...45em` ->
-`...32em` still needs a new id. The only exception is an *unchanged* cross-file
-move, which keeps its id. Brand-new strings (no predecessor) are never migrated -
-they're translated from scratch.
+`.accesskey`, or `.key`, **and including structural changes that move text between
+the value and an attribute even when the text itself is reused** (dropping the
+value and adding `.label`, promoting a `.label` to the value, etc.). A message whose
+only edit is `.style = ...45em` -> `...32em` still needs a new id; so does one that
+turns `foo = Add an item` into `foo =\n    .label = Add an item`. Reused text makes
+such a restructure *migratable* (from the old id), but it does **not** exempt it
+from needing a new id. When you see a same-id restructure in a diff, flag it: the fix is for
+the dev to bump the id, after which it migrates cleanly. The only exception to the
+new-id rule is an *unchanged* cross-file move, which keeps its id. A brand-new id (no predecessor of its own) is usually
+translated from scratch - *but not always*: if **every** translatable part of it
+reuses the exact text of an existing source string, it is migratable via
+cross-message reuse (copy each part with `COPY_PATTERN` from that other source),
+subject to the no-partial rule and the cross-message context check below. Only a
+new string for which some part has no reusable source is left out entirely. Do not
+reflexively dismiss a new id as "translated fresh" - first check whether its text
+already exists elsewhere.
 
 If text matches several candidate source strings (AMBIGUOUS), pick the source by
 hand. For legacy `.properties`, you can also scaffold with `properties-to-ftl`
 (https://github.com/mozilla/properties-to-ftl).
 
-When a single target message draws its parts from **more than one source
-message** (e.g. a restructure whose value comes from one string and whose
-`.title`/`.header` come from others), the test only proves the *English text*
+When a target message draws its parts from a **different source message** - one or
+more (e.g. a restructure whose value comes from one string and whose
+`.title`/`.header` come from others, or a brand-new id whose `.title`/`.aria-label`
+reuse some existing string's value), the test only proves the *English text*
 matches - it cannot tell you the borrowed translation belongs in the new context.
 A translation that is correct in its original message may be wrong once reused
 elsewhere. For every such cross-message reuse, surface it to the user and have
@@ -147,8 +162,10 @@ visual aid), which sorts every finding into three levels:
   the cardinal-rule treatment (a **new id**, counting *every* attribute - see step
   2). Flagging that a string "needs a new id" is **not** an invitation to then
   migrate its unchanged parts: if any part changed, the whole message stays out (no
-  partial - see the hard rules). Genuinely new strings and quarantined strings are
-  fine to ignore.
+  partial - see the hard rules). A genuinely new string with no reusable source for
+  some part, and quarantined strings, are fine to ignore - but a brand-new string
+  whose *every* part matches an existing source string's text should be migrated via
+  cross-message reuse (step 2), not ignored.
 
 Relay **every** ERROR and WARNING line the summary prints to the user - never drop
 a finding just because it isn't described above. Use the summary to correct
