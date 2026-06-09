@@ -50,8 +50,8 @@ generator - the test is the source of truth.
 
 ### 1. Get the diff of the string changes
 
-The bug number comes from the work you're doing, not from git, so this works on
-uncommitted changes too. Look only at `.ftl` / `.properties` files:
+These commands work on uncommitted changes too. Look only at `.ftl` /
+`.properties` files:
 
 ```bash
 # working tree (local-only change):
@@ -97,11 +97,29 @@ If text matches several candidate source strings (AMBIGUOUS), pick the source by
 hand. For legacy `.properties`, you can also scaffold with `properties-to-ftl`
 (https://github.com/mozilla/properties-to-ftl).
 
+When a single target message draws its parts from **more than one source
+message** (e.g. a restructure whose value comes from one string and whose
+`.title`/`.header` come from others), the test only proves the *English text*
+matches - it cannot tell you the borrowed translation belongs in the new context.
+A translation that is correct in its original message may be wrong once reused
+elsewhere. For every such cross-message reuse, surface it to the user and have
+them **independently confirm the source string's context matches the target's**
+before relying on the migration; if the contexts don't line up, leave that part
+(and therefore the whole message - no partial) out and let it translate fresh.
+
 ### 3. Write the recipe file
 
 Path: `python/l10n/fluent_migrations/bug_<number>_<slug>.py`. The docstring must
 contain the bug number and the literal `part {index}`. Use one `add_transforms`
 block per `(target, from_path)` pair. See "Recipe shape" below for the template.
+
+The bug number comes from the work you're doing - look in the relevant commit
+message (`git log`, e.g. `git log -1 --format=%s`, or the bug reference on the
+commit you diffed) and the conversation/task. If you can't find it, **use a
+numeric placeholder** - `bug_0000000_<slug>.py` with `Bug 0000000` in the
+docstring - rather than stalling; it keeps the test passing. Then tell the user
+plainly that the bug number is a placeholder they must replace (rename the file
+and update the docstring to match) before landing.
 
 ### 4. Validate with the in-tree test (authoritative)
 
@@ -125,16 +143,10 @@ visual aid), which sorts every finding into three levels:
   en-US, usually a wrong or mistyped target id - fix it); or "No migration applied"
   (the recipe produced no changes at all - almost always a mistake - fix it).
 - **INFO**: strings that differ but aren't in the recipe. Surface these to the
-  user for review rather than silently ignoring them: any string with an added or
-  removed attribute, or any non-capitalization change to its value *or any
-  attribute*, needs a **new string id** (keeping the id leaves locales with the
-  stale translation). This counts **every** attribute, including ones that aren't
-  prose - `.style`, `.accesskey`, `.key`, `.aria-label`, etc. are all localizable,
-  so a changed `.style = min-width: 32em` or a changed `.accesskey` is a real
-  change that demands a new id. Never wave a diff through on the reasoning that an
-  attribute "isn't translatable text" - if it's in the `.ftl`, locales own it.
-  Flagging that a string "needs a new id" is **not** an invitation to then migrate
-  its unchanged parts: if any part changed, the whole message stays out (no
+  user for review rather than silently ignoring them: each changed string needs
+  the cardinal-rule treatment (a **new id**, counting *every* attribute - see step
+  2). Flagging that a string "needs a new id" is **not** an invitation to then
+  migrate its unchanged parts: if any part changed, the whole message stays out (no
   partial - see the hard rules). Genuinely new strings and quarantined strings are
   fine to ignore.
 
