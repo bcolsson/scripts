@@ -8,8 +8,8 @@ description: >
   the recipe by hand, and validate it with the in-tree `./mach
   fluent-migration-test`. Triggers: "write/generate a fluent migration", "migrate
   these strings", renamed/bumped l10n IDs (foo -> foo2), moving a value to/from an
-  attribute, moving a string between files, .properties -> Fluent. Also covers
-  changes that must NOT be migrated.
+  attribute, adding or removing an attribute on a message, moving a string between
+  files, .properties -> Fluent. Also covers changes that must NOT be migrated.
 ---
 
 ## What this does
@@ -30,10 +30,20 @@ generator - the test is the source of truth.
 - **No partial migrations.** Migration is all-or-nothing per message. Every
   translatable part of the target message (its value and *each* attribute) must
   be rebuildable from reused source content via `COPY`/`COPY_PATTERN`. If any part
-  is new or changed - a new attribute like an added `.description`, a changed
-  value, or an attribute with reworded text - you can't migrate just the reused
-  parts. Leave the **whole message** out of the recipe and let it translate fresh.
-  Bumping the id does **not** rescue such a message: a message that changed one
+  is new or changed - a new attribute, a removed attribute, a changed value, or an
+  attribute with reworded text - you can't migrate *just* the reused parts: either
+  the **whole message** is migratable (every part the new message *keeps*, rebuilt
+  from reused source under a new id) or it stays out of the recipe entirely and
+  translates fresh. Whether every kept part has a reusable source decides which:
+  an attribute with genuinely new wording has none, so the whole message stays out;
+  but a new attribute that *reuses* an existing source string's text (e.g. adding
+  `.aria-label = Go back` to a message whose old `.title` was already `Go back`)
+  makes the **whole** message migratable from reused content under a new id - copy
+  the kept `.title` and the added `.aria-label` both from the old `.title`. Removing
+  an attribute is likewise migratable under a new id: copy each surviving part from
+  its old counterpart and just don't reference the dropped one. Either way the id
+  must be bumped first - see the added/removed-attribute rows in step 2.
+  Bumping the id does **not** by itself rescue a message: a message that changed one
   attribute (say `.style = ...45em` -> `...32em`) still needs a new id *and* still
   stays out of the recipe, because migrating its unchanged `.title` while the
   `.style` changed is exactly a partial migration. Never suggest "give it a new id
@@ -74,15 +84,33 @@ git show <rev>:browser/locales/en-US/browser/preferences/containers.ftl
 Decide, per message, what the recipe should do. This table is the core of the
 job:
 
+**First, a mandatory mechanical step - do this for _every_ added id before you
+classify anything.** Naming-based comparison (`foo` vs `foo-1`) is NOT sufficient
+and is the classic way to wrongly stamp a migratable string "fresh": a new id
+often reuses the exact text of a *differently named* message (e.g. a new
+`...feature-introduction-title-1` whose value matches an unrelated
+`unauthenticated-vpn-title`). So for each added message, extract its literal value
+(and each attribute's literal value) and grep that exact text across the changed
+`.ftl`/`.properties` file(s) themselves to find any byte-identical (or
+capitalization-only) source there. Limit the search to the files touched by the
+diff - do not branch out into other files. Run this search uniformly for all added
+ids, including long prose strings; never skip a string because it "looks novel" or
+decide by intuition which ones "might" collide. Only after this search comes up
+empty for a part may you classify that part as translated-fresh. A convenient
+sweep: pull every added (`^\+`) message value from the diff and search each one's
+text within the changed files, rather than hand-picking a subset.
+
 | What changed | Migrate? | How |
 | --- | --- | --- |
 | id renamed/bumped, text identical (`foo` -> `foo2`) | Yes | `COPY_PATTERN(from_path, "foo")` for the value; `"foo.attr"` for each attribute |
-| capitalization-only difference | Yes (still reusable) | same as above; the test flags it `WARNING` - confirm only the casing changed |
+| capitalization-only difference | Yes (still reusable) | same as above; the test flags it `WARNING` - confirm only the casing changed. **But a new id + migration is optional here** - the casing can instead be changed in place under the *same id*, with no recipe at all |
 | wording genuinely changed | **No** | new id, translated fresh; leave out of the recipe entirely |
 | moved to another file, text unchanged | Yes | `target` = new file, `from_path` = old file; a pure move may even keep its id |
 | value <-> attribute restructure, **all** text reused, **with a new id or new file** | Yes | `COPY_PATTERN` each reused piece from the *old* id |
 | value <-> attribute restructure keeping the **same id in the same file** | **No - flag it** | the message changed, so this is a cardinal-rule violation: the dev must bump the id first. A recipe entry here is a self-migration the test rejects (no-op) |
-| restructure that adds/changes any text (new `.description`, changed `.style`, ...) | **No** (no partial) | leave the whole message out |
+| attribute **added or removed** (e.g. add `.aria-label`, drop `.accesskey`), **id kept** | **No - flag it** | adding *or* removing a part *changes* the message, so it needs a new id; keeping the id is a cardinal-rule violation. Tell the dev to bump the id, then migrate per the next row. (Migrating under the same id would also be a self-migration the test rejects.) |
+| attribute added or removed **under a new id**, and every part of the new message reuses an existing source string's text | Yes | `COPY_PATTERN` *every* part of the new message from a reused source. **Removed** attribute: copy each surviving part from its old counterpart (the dropped one simply isn't referenced). **Added** attribute: copy the carried-over parts from their old counterparts and the added attribute from whatever source shares its text - often another attribute of the old message (e.g. both `.title` and a new `.aria-label` from the old `back-nav-button-title.title`). Confirm cross-message context if any borrowed text comes from a different message |
+| restructure that adds/changes any text (new `.description`, changed `.style`, ...) with no reusable source for some part | **No** (no partial) | leave the whole message out |
 | brand-new id, but **every** part reuses an existing source string's text (cross-message reuse) | Yes | `COPY_PATTERN(from_path, "<other-source-id>")` (or `.attr`) for each part; confirm the source context matches - see cross-message note below |
 | legacy `.properties` key -> Fluent | Yes | `COPY` / `REPLACE` / `PLURALS` / `CONCAT` (see below) |
 
@@ -90,12 +118,16 @@ Cardinal rule: **a changed string must get a new identifier** (unique, with a
 meaning that stays stable across files) - otherwise locales keep showing the old
 translation next to the new English. "Changed" means any non-capitalization change
 to the value *or to any attribute* - including non-prose attributes like `.style`,
-`.accesskey`, or `.key`, **and including structural changes that move text between
+`.accesskey`, or `.key`, **including adding a brand-new attribute or removing an
+existing one** (the message gains or loses a part, so it changed - e.g. adding
+`.aria-label` to a message that only had `.title`, or dropping a `.accesskey`),
+**and including structural changes that move text between
 the value and an attribute even when the text itself is reused** (dropping the
 value and adding `.label`, promoting a `.label` to the value, etc.). A message whose
 only edit is `.style = ...45em` -> `...32em` still needs a new id; so does one that
-turns `foo = Add an item` into `foo =\n    .label = Add an item`. Reused text makes
-such a restructure *migratable* (from the old id), but it does **not** exempt it
+turns `foo = Add an item` into `foo =\n    .label = Add an item`, and so does one
+that merely gains or loses an attribute. Reused text makes
+such a change *migratable* (from the old id), but it does **not** exempt it
 from needing a new id. When you see a same-id restructure in a diff, flag it: the fix is for
 the dev to bump the id, after which it migrates cleanly. The only exception to the
 new-id rule is an *unchanged* cross-file move, which keeps its id. A brand-new id (no predecessor of its own) is usually
